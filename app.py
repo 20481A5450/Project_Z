@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-
+## This is a simple FastAPI application that provides two endpoints.
 app = FastAPI()
 
 @app.get("/")
