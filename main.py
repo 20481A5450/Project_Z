@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-# from app.data_loader import load_markdown_as_chunks, embed_chunks
-# from app.rag import RAGSearch
+from app.data_loader import load_markdown_as_chunks, embed_chunks
+from app.rag import RAGSearch
 from dotenv import load_dotenv
 import google.generativeai as genai
 import os
@@ -10,6 +10,7 @@ import logging
 # Load environment variables from .env
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Configure CORS to allow only your frontend (GitHub Pages)
 app = FastAPI()
@@ -30,6 +31,28 @@ app.add_middleware(
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 gemini_model = genai.GenerativeModel("gemini-1.5-flash-latest")
 
+# Download and load precomputed embeddings from Hugging Face
+EMBEDDINGS_REPO = "ShaikZo/zo-embeddings"
+EMBEDDINGS_FILENAME = "embeddings.pkl"
+
+try:
+    logger.info("Downloading embeddings.pkl from Hugging Face Hub...")
+    pkl_path = hf_hub_download(repo_id=EMBEDDINGS_REPO, filename=EMBEDDINGS_FILENAME)
+
+    with open(pkl_path, "rb") as f:
+        (tokenizer, embedding_model), embeddings, chunks = pickle.load(f)
+
+    rag = RAGSearch(embeddings, chunks)
+    logger.info("✅ Embeddings loaded successfully.")
+except Exception as e:
+    logger.error(f"❌ Failed to download or load embeddings: {e}")
+    raise RuntimeError("Could not initialize embeddings from Hugging Face Hub.")
+
+
+# Configure Gemini
+genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+gemini_model = genai.GenerativeModel("gemini-1.5-flash-latest")
+
 # Gemini response generation function
 def generate_response_with_gemini(user_input, context_chunk):
     prompt = f"""
@@ -45,28 +68,28 @@ def generate_response_with_gemini(user_input, context_chunk):
     response = gemini_model.generate_content(prompt)
     return response.text.strip()
 
-# # Load and embed markdown resume
-# chunks = load_markdown_as_chunks("data/data.md")
-# (tokenizer, embedding_model), embeddings, chunks = embed_chunks(chunks)
-# rag = RAGSearch(embeddings, chunks)
+# Load and embed markdown resume
+chunks = load_markdown_as_chunks("data/data.md")
+(tokenizer, embedding_model), embeddings, chunks = embed_chunks(chunks)
+rag = RAGSearch(embeddings, chunks)
 
 @app.get("/health")
 def health_check():
     try:
-        # Verify critical components
-        # if not hasattr(gemini_model, 'generate_content'):
-        #     raise Exception("Gemini model not initialized")
+        Verify critical components
+        if not hasattr(gemini_model, 'generate_content'):
+            raise Exception("Gemini model not initialized")
         
-        # # Verify data loaded
-        # if len(rag.chunks) == 0:
-        #     raise Exception("No resume data loaded")
+        # Verify data loaded
+        if len(rag.chunks) == 0:
+            raise Exception("No resume data loaded")
             
-        # return {"status": "healthy", "components": {
-        #     "gemini": "ok",
-        #     "resume_data": f"{len(rag.chunks)} chunks loaded",
-        #     "embeddings": f"{rag.embeddings.shape} vectors"
-        # }}
-        pass
+        return {"status": "healthy", "components": {
+            "gemini": "ok",
+            "resume_data": f"{len(rag.chunks)} chunks loaded",
+            "embeddings": f"{rag.embeddings.shape} vectors"
+        }}
+        # pass
     except Exception as e:
         return {"status": "error", "message": str(e)}       
 
@@ -78,22 +101,22 @@ async def handle_query(req: Request):
         if not user_input:
             raise HTTPException(status_code=400, detail="Input is required")
 
-        # # print(f"User input: {user_input}")
-        # retrieved_chunk = rag.query(user_input, (tokenizer, embedding_model), top_k=5)
-        # # print(f"Retrieved chunk: {retrieved_chunk}")
+        # print(f"User input: {user_input}")
+        retrieved_chunk = rag.query(user_input, (tokenizer, embedding_model), top_k=5)
+        # print(f"Retrieved chunk: {retrieved_chunk}")
 
-        # response = generate_response_with_gemini(user_input, retrieved_chunk)
+        response = generate_response_with_gemini(user_input, retrieved_chunk)
 
-        # if not response or "doesn't mention" in response.lower():
-        #     return {
-        #         "response": (
-        #             "I’m sorry, I couldn’t find a relevant answer in Zohaib’s resume. "
-        #             "Would you like me to pass your message along to him?"
-        #         )
-        #     }
+        if not response or "doesn't mention" in response.lower():
+            return {
+                "response": (
+                    "I’m sorry, I couldn’t find a relevant answer in Zohaib’s resume. "
+                    "Would you like me to pass your message along to him?"
+                )
+            }
 
-        # # print(f"Gemini Response: {response}")
-        # return {"response": response}
+        # print(f"Gemini Response: {response}")
+        return {"response": response}
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
