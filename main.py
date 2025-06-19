@@ -1,5 +1,7 @@
+import pickle
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from huggingface_hub import hf_hub_download
 from app.data_loader import load_markdown_as_chunks, embed_chunks
 from app.rag import RAGSearch
 from dotenv import load_dotenv
@@ -37,15 +39,20 @@ EMBEDDINGS_FILENAME = "embeddings.pkl"
 
 try:
     logger.info("Downloading embeddings.pkl from Hugging Face Hub...")
-    pkl_path = hf_hub_download(repo_id=EMBEDDINGS_REPO, filename=EMBEDDINGS_FILENAME)
+    hf_token = os.getenv("HUGGINGFACE_TOKEN")
+    pkl_path = hf_hub_download(
+        repo_id=EMBEDDINGS_REPO,
+        filename=EMBEDDINGS_FILENAME,
+        token=hf_token
+    )
 
     with open(pkl_path, "rb") as f:
         (tokenizer, embedding_model), embeddings, chunks = pickle.load(f)
 
     rag = RAGSearch(embeddings, chunks)
-    logger.info("✅ Embeddings loaded successfully.")
+    logger.info("Embeddings loaded successfully.")
 except Exception as e:
-    logger.error(f"❌ Failed to download or load embeddings: {e}")
+    logger.error(f"Failed to download or load embeddings: {e}")
     raise RuntimeError("Could not initialize embeddings from Hugging Face Hub.")
 
 
