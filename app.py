@@ -1,7 +1,9 @@
 from fastapi import FastAPI
-## This is a simple FastAPI application that provides two endpoints.
+
+
 app = FastAPI()
 
+print("Hello from both local and Hugging Face")
 @app.get("/")
 def greet_json():
     return {"Hello": "World!"}
