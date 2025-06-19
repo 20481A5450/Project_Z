@@ -76,7 +76,7 @@ rag = RAGSearch(embeddings, chunks)
 @app.get("/health")
 def health_check():
     try:
-        Verify critical components
+        # Verify critical components
         if not hasattr(gemini_model, 'generate_content'):
             raise Exception("Gemini model not initialized")
         
