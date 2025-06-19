@@ -33,8 +33,7 @@ app.add_middleware(
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 gemini_model = genai.GenerativeModel("gemini-1.5-flash-latest")
 
-# Download and load precomputed embeddings from Hugging Face
-EMBEDDINGS_REPO = "ShaikZo/zo-embeddings"
+EMBEDDINGS_REPO = "ShaikZo/embedding-cache"
 EMBEDDINGS_FILENAME = "embeddings.pkl"
 
 try:
@@ -43,18 +42,21 @@ try:
     pkl_path = hf_hub_download(
         repo_id=EMBEDDINGS_REPO,
         filename=EMBEDDINGS_FILENAME,
-        token=hf_token
+        token=hf_token  # Only needed if the repo is private
     )
+
+    logger.info(f"Downloaded file to: {pkl_path}")
 
     with open(pkl_path, "rb") as f:
         (tokenizer, embedding_model), embeddings, chunks = pickle.load(f)
 
     rag = RAGSearch(embeddings, chunks)
+    print(f"Loaded {len(chunks)} chunks with shape {embeddings.shape} from embeddings.pkl")
     logger.info("Embeddings loaded successfully.")
 except Exception as e:
-    logger.error(f"Failed to download or load embeddings: {e}")
-    raise RuntimeError("Could not initialize embeddings from Hugging Face Hub.")
-    print(str(e))
+    logger.exception("Failed to download or load embeddings.")
+    print(f"Error: {e}")
+    raise RuntimeError(f"Could not initialize embeddings from Hugging Face Hub: {e}")
 
 
 # Configure Gemini
