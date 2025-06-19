@@ -54,6 +54,7 @@ try:
 except Exception as e:
     logger.error(f"Failed to download or load embeddings: {e}")
     raise RuntimeError("Could not initialize embeddings from Hugging Face Hub.")
+    print(str(e))
 
 
 # Configure Gemini
