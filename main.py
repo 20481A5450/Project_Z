@@ -10,7 +10,7 @@ import os
 import logging
 import uvicorn # Add uvicorn import for running the app
 
-# --- Configuration and Initialization ---
+# Trying to make the app better without latency issues, cold starts, or other common issues
 
 # Load environment variables from .env
 load_dotenv()
