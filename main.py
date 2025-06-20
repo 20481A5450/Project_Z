@@ -38,7 +38,7 @@ EMBEDDINGS_FILENAME = "embeddings.pkl"
 
 try:
     logger.info("Downloading embeddings.pkl from Hugging Face Hub...")
-    hf_token = os.getenv("HUGGINGFACE_TOKEN")
+    hf_token = os.getenv("HUGGINGFACE_HUB_TOKEN")
     pkl_path = hf_hub_download(
         repo_id=EMBEDDINGS_REPO,
         filename=EMBEDDINGS_FILENAME,
