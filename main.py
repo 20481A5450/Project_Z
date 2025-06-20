@@ -47,12 +47,8 @@ try:
 
     logger.info(f"Downloaded file to: {pkl_path}")
 
-    with open(pkl_path, "rb") as f:
-        (tokenizer, embedding_model), embeddings, chunks = pickle.load(f)
 
-    rag = RAGSearch(embeddings, chunks)
-    print(f"Loaded {len(chunks)} chunks with shape {embeddings.shape} from embeddings.pkl")
-    logger.info("Embeddings loaded successfully.")
+    # logger.info("Embeddings loaded successfully.")
 except Exception as e:
     logger.exception("Failed to download or load embeddings.")
     print(f"Error: {e}")
