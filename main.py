@@ -9,6 +9,8 @@ import google.generativeai as genai
 import os
 import logging
 
+## Working without intervention but with some area of improvement interms of chuncking and interms of Accuracy and response generation
+
 # Load environment variables from .env
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
