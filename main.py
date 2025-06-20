@@ -11,7 +11,7 @@ import logging
 import uvicorn
 import numpy as np
 
-# --- Configuration and Initialization ---
+# Modifications in code for better response and issues which are solved now
 
 # Load environment variables from .env
 load_dotenv()
