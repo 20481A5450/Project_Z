@@ -1,8 +1,9 @@
 import pickle
+import asyncio
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from huggingface_hub import hf_hub_download
-from app.data_loader import load_markdown_as_chunks, embed_chunks, mean_pooling # Ensure mean_pooling is imported if used elsewhere
+from app.data_loader import load_markdown_as_chunks, embed_chunks, mean_pooling
 from app.rag import RAGSearch
 from dotenv import load_dotenv
 import google.generativeai as genai
@@ -10,8 +11,7 @@ import os
 import logging
 import uvicorn
 import numpy as np
-
-# Modifications in code for better response and issues which are solved now
+import groq
 
 # Load environment variables from .env
 load_dotenv()
@@ -23,49 +23,48 @@ logger = logging.getLogger(__name__)
 # FastAPI app initialization
 app = FastAPI(
     title="Zohaib's AI Resume Assistant",
-    description="An AI assistant powered by Google Gemini and RAG to answer questions about Zohaib Shaik's resume.",
+    description="An AI assistant powered by Google Gemini and RAG to answer questions about Zohaib Shaik's resume, with dynamic API routing.",
     version="1.0.0"
 )
 
 # Configure CORS to allow specific origins for your frontend
-# IMPORTANT: For production, change "*" to your actual GitHub Pages URL(s)
-origins = [  # Replace with your actual GitHub Pages URL
-    "http://localhost:3000",      # For local React/Vue/Angular dev server
-    "http://127.0.0.1:3000",      # Another common local dev server address
-    "http://localhost:8000",      # If your frontend or testing tool is on this port
+origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:8000",
     "http://127.0.0.1:8000",
-    # Add any other origins your frontend might be hosted on in production
-    # Remove "*" once you have all production origins listed for security
-    "*" # Keep during development for flexibility, but tighten for production
+    "https://20481A5450.github.io/Zo",
+    "*"
 ]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"], # Consider limiting to ["GET", "POST"] for production APIs
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # Global variables for critical components, initialized as None
 gemini_model = None
+groq_client = None
 rag = None
 tokenizer_embedding_model_tuple = None
 
-# Define constants (can be moved to a separate config.py for larger projects)
+# Define constants
 EMBEDDINGS_REPO = "ShaikZo/embedding-cache"
 EMBEDDINGS_FILENAME = "embeddings.pkl"
 RESUME_DATA_PATH = "data/data.md"
-DEFAULT_SIMILARITY_THRESHOLD = 0.75 # Good starting point, tune as needed
-DEFAULT_TOP_K_CHUNKS = 5 # Changed from 3 to 5 based on your observation for better retrieval
+DEFAULT_SIMILARITY_THRESHOLD = 0.75
+DEFAULT_TOP_K_CHUNKS = 5
+GROQ_MODEL_NAME = "llama3-8b-8192" # Define the GROQ model name here
 
 # --- Startup Event Handlers ---
 
 @app.on_event("startup")
 async def startup_event():
     """
-    Initializes critical components (Gemini, Embeddings, RAG) on application startup.
-    This ensures that the app is ready to serve requests once started.
+    Initializes critical components (Gemini, GROQ, Embeddings, RAG) on application startup.
     """
     logger.info("Application startup initiated.")
 
@@ -74,40 +73,57 @@ async def startup_event():
     try:
         google_api_key = os.getenv("GOOGLE_API_KEY")
         if not google_api_key:
-            logger.error("GOOGLE_API_KEY environment variable not set. Gemini model will not be initialized.")
+            logger.warning("GOOGLE_API_KEY environment variable not set. Gemini model will not be initialized.")
             gemini_model = None
-            # Do NOT raise error here if you want the app to start in a degraded state
-            # but queries will fail if Gemini is uninitialized.
         else:
             genai.configure(api_key=google_api_key)
-            # A small test call to ensure connectivity
             try:
-                # Use a very minimal generation to quickly check API connectivity and key validity
-                _ = genai.GenerativeModel("gemini-1.5-flash-latest").generate_content("test", generation_config=genai.types.GenerationConfig(max_output_tokens=1))
+                # A small test call to ensure connectivity
+                _ = await genai.GenerativeModel("gemini-1.5-flash-latest").generate_content_async("test", generation_config=genai.types.GenerationConfig(max_output_tokens=1))
                 gemini_model = genai.GenerativeModel("gemini-1.5-flash-latest")
                 logger.info("Google Gemini model configured successfully.")
             except Exception as gemini_conn_err:
                 logger.error(f"Failed to connect to Google Gemini API with provided key: {gemini_conn_err}. Gemini model will not be available.")
                 gemini_model = None
-
     except Exception as e:
         logger.exception(f"Unexpected error during Gemini configuration: {e}")
-        gemini_model = None # Ensure it's None if configuration itself fails
+        gemini_model = None
 
-    # 2. Load and embed markdown resume data
+    # 2. Configure GROQ Client
+    global groq_client
+    try:
+        groq_api_key = os.getenv("GROQ_API_KEY")
+        if not groq_api_key:
+            logger.warning("GROQ_API_KEY environment variable not set. GROQ API client will not be initialized.")
+            groq_client = None
+        else:
+            groq_client = groq.Groq(api_key=groq_api_key)
+            # A small test call to ensure connectivity
+            try:
+                _ = await groq_client.chat.completions.create(
+                    messages=[{"role": "user", "content": "test"}],
+                    model=GROQ_MODEL_NAME, # Use the defined model name here
+                    max_tokens=1
+                )
+                logger.info(f"GROQ API client initialized successfully using model: {GROQ_MODEL_NAME}.")
+            except Exception as groq_conn_err:
+                logger.error(f"Failed to connect to GROQ API with provided key or model '{GROQ_MODEL_NAME}': {groq_conn_err}. GROQ API will not be available.")
+                groq_client = None
+    except Exception as e:
+        logger.exception(f"Unexpected error during GROQ configuration: {e}")
+        groq_client = None
+
+    # 3. Load and embed markdown resume data
     global rag, tokenizer_embedding_model_tuple
     try:
-        # Determine the local path for the embeddings pickle
         local_embeddings_cache_path = os.path.join("data", EMBEDDINGS_FILENAME)
-        os.makedirs("data", exist_ok=True) # Ensure 'data' directory exists for local caching
+        os.makedirs("data", exist_ok=True)
 
-        # Attempt to download embeddings from Hugging Face Hub first
         hf_token = os.getenv("HUGGINGFACE_HUB_TOKEN")
         downloaded_pkl_path = None
         if hf_token:
             try:
                 logger.info(f"Attempting to download {EMBEDDINGS_FILENAME} from Hugging Face Hub...")
-                # hf_hub_download caches to ~/.cache/huggingface by default
                 downloaded_pkl_path = hf_hub_download(
                     repo_id=EMBEDDINGS_REPO,
                     filename=EMBEDDINGS_FILENAME,
@@ -117,11 +133,8 @@ async def startup_event():
             except Exception as e:
                 logger.warning(f"Failed to download cached embeddings from Hugging Face Hub: {e}. Will attempt to use/generate local cache.")
         
-        # Load raw chunks from your markdown file
         chunks_from_markdown = load_markdown_as_chunks(RESUME_DATA_PATH)
         
-        # Pass the path where embed_chunks should look for/save the pickle.
-        # Prioritize downloaded path, otherwise use local 'data/' path.
         actual_embed_path_for_func = downloaded_pkl_path or local_embeddings_cache_path
 
         tokenizer_embedding_model_tuple, embeddings_data, processed_chunks_for_rag = \
@@ -135,50 +148,82 @@ async def startup_event():
 
     except Exception as e:
         logger.exception("Failed to initialize RAGSearch system (embeddings, chunks). AI assistant will operate in a degraded mode.")
-        # Set rag to None to indicate it's not ready, handle this in query endpoint
         rag = None
         tokenizer_embedding_model_tuple = None
     
     logger.info("Application startup complete.")
 
 
-# --- Gemini Response Generation Function ---
+# --- Prompt Generation Functions ---
 
-def generate_response_with_gemini(user_input: str, context_chunk: str) -> str:
+def create_resume_prompt(user_input: str, context_chunk: str, assistant_name: str = "Zo", is_first_query: bool = False) -> str:
     """
-    Generates a response using the Gemini model based on user input and retrieved context.
-    Includes refined persona and instruction for recruiters/casual questions.
+    Generates a friendly and professional prompt for the AI assistant.
+    Adjusts persona based on user query and available context.
+    Conditionally adds introductory message based on is_first_query flag.
     """
-    global gemini_model # Use global model variable
-    if gemini_model is None:
-        logger.error("Gemini model is not initialized. Cannot generate response.")
-        return "" # Return empty string to trigger fallback message
-
-    # Refined prompt for clarity and conciseness
-    prompt = f"""
-    You are Zo, Zohaib Shaik's friendly and professional AI assistant.
-    
-    Your primary goal is to answer user questions using *only* the "Resume Info" provided.
-    If the answer is not explicitly present or directly inferable from the "Resume Info", you must politely state that the information is not available in Zohaib's resume. Do not make up information.
-
-    - **For Recruiters/Hiring Managers (indicated by words like 'opportunity', 'hiring', 'company', 'interview'):** Acknowledge their professional intent. Offer to notify Zohaib directly or suggest they contact him via his provided contact information (if available in the resume context). Example: "It sounds like you're interested in a potential opportunity. Based on Zohaib's resume, [answer]. Would you like me to share Zohaib's contact information or pass along your message?"
-
-    - **For Casual Questions (e.g., 'Who are you?', 'How are you doing?', 'Tell me a joke'):** Introduce yourself as Zohaib's assistant, Zo, and respond in a friendly, helpful, and engaging manner. Politely steer the conversation back to topics related to Zohaib's resume or professional background.
+    base_instruction = f"""
+    You are {assistant_name}, Zohaib Shaik's friendly and professional AI assistant.
+    Your main goal is to help users by answering questions strictly based on the "Resume Information" provided.
+    If you cannot find the answer explicitly in the "Resume Information", please politely and genuinely state that the information isn't available in Zohaib's resume. Do not invent details.
 
     ---
-    Resume Info:
+    Resume Information:
     {context_chunk}
     ---
     User's Question: {user_input}
     ---
-    Your response:
     """
+
+    recruiter_keywords = ['opportunity', 'hiring', 'company', 'interview', 'recruiter', 'job', 'position', 'role', 'team', 'connect']
+    is_recruiter_query = any(keyword in user_input.lower() for keyword in recruiter_keywords)
+
+    intro_message = ""
+    if is_first_query:
+        if is_recruiter_query:
+            intro_message = "Hello there! As Zohaib's assistant, I'd be happy to help with that. Regarding Zohaib's resume..."
+        else:
+            intro_message = "Hello! I'm Zo, Zohaib's AI assistant, here to help you navigate his resume. Regarding your question..."
+    
+    # Add an empty line if an intro message was added, for separation
+    if intro_message:
+        intro_message += "\n\n"
+
+    additional_instruction = ""
+    if is_recruiter_query:
+        additional_instruction = f"""
+        After providing the answer based on the resume, gently offer to connect them with Zohaib or suggest they use his contact details (phone: +91 6281732166, email: shaikzohaibgec@gmail.com, LinkedIn: linkedin.com/in/zohaib-shaik-1a8877216).
+        Prioritize providing the direct contact details if asked, or offer to pass a message if preferred.
+        """
+    else:
+        additional_instruction = """
+        For general or casual questions (e.g., about yourself as an AI, greetings, or off-topic questions):
+        Gently guide the conversation back to topics related to Zohaib's professional background or resume.
+        If a question is completely irrelevant and cannot be related to the resume, politely decline to answer,
+        e.g., "That's an interesting question, but my purpose is to answer questions about Zohaib's professional profile. Is there anything else about his resume I can help you with?"
+        """
+    
+    return intro_message + base_instruction + additional_instruction + "\nYour helpful and concise response:"
+
+
+# --- Gemini Response Generation Function ---
+
+async def generate_response_with_gemini(user_input: str, context_chunk: str, is_first_query: bool) -> str:
+    """
+    Generates a response using the Gemini model based on user input and retrieved context.
+    """
+    global gemini_model
+    if gemini_model is None:
+        logger.error("Gemini model is not initialized. Cannot generate response with Gemini.")
+        return ""
+
+    prompt = create_resume_prompt(user_input, context_chunk, assistant_name="Zo", is_first_query=is_first_query)
     
     try:
-        response = gemini_model.generate_content(prompt, 
+        response = await gemini_model.generate_content_async(prompt,
             generation_config=genai.types.GenerationConfig(
-                temperature=0.2, # Lower temperature for more factual, less creative responses
-                max_output_tokens=500 # Limit output length to prevent rambling
+                temperature=0.2,
+                max_output_tokens=500
             ),
             safety_settings={
                 genai.types.HarmCategory.HARM_CATEGORY_HARASSMENT: genai.types.HarmBlockThreshold.BLOCK_NONE,
@@ -188,7 +233,6 @@ def generate_response_with_gemini(user_input: str, context_chunk: str) -> str:
             }
         )
         
-        # Check if the response actually contains text and is not blocked
         if response and response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
             return response.text.strip()
         elif response and response.prompt_feedback and response.prompt_feedback.block_reason:
@@ -196,11 +240,46 @@ def generate_response_with_gemini(user_input: str, context_chunk: str) -> str:
             return "I'm sorry, I cannot provide a response to that question."
         else:
             logger.warning(f"Gemini returned an empty or invalid response for query: '{user_input}'")
-            return "" # Explicitly return empty string if no valid text
+            return ""
 
     except Exception as e:
         logger.error(f"Error generating Gemini response for input '{user_input[:50]}...': {e}")
-        return "" # Return empty string on error to trigger fallback message
+        return ""
+
+# --- GROQ Response Generation Function ---
+
+async def generate_response_with_groq(user_input: str, context_chunk: str, is_first_query: bool) -> str:
+    """
+    Generates a response using the GROQ model based on user input and retrieved context.
+    """
+    global groq_client
+    if groq_client is None:
+        logger.error("GROQ client is not initialized. Cannot generate response with GROQ.")
+        return ""
+
+    prompt_content = create_resume_prompt(user_input, context_chunk, assistant_name="Zo", is_first_query=is_first_query)
+    
+    try:
+        chat_completion = await groq_client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": "You are Zo, Zohaib Shaik's friendly and professional AI assistant. You answer questions strictly based on the provided resume information."},
+                {"role": "user", "content": prompt_content},
+            ],
+            model=GROQ_MODEL_NAME, # Use the defined model name here
+            temperature=0.2,
+            max_tokens=500,
+        )
+        
+        if chat_completion.choices and chat_completion.choices[0].message and chat_completion.choices[0].message.content:
+            return chat_completion.choices[0].message.content.strip()
+        else:
+            logger.warning(f"GROQ returned an empty or invalid response for query: '{user_input}'")
+            return ""
+
+    except Exception as e:
+        logger.error(f"Error generating GROQ response for input '{user_input[:50]}...': {e}")
+        return ""
+
 
 # --- API Endpoints ---
 
@@ -216,7 +295,6 @@ def health_check():
     if gemini_model is not None:
         try:
             # Perform a very quick, minimal call to verify connectivity
-            # Use a short timeout to prevent blocking if Gemini API is slow
             _ = gemini_model.generate_content("ping", generation_config=genai.types.GenerationConfig(max_output_tokens=1))
             status["components"]["gemini"] = "ok"
         except Exception as e:
@@ -226,6 +304,23 @@ def health_check():
     else:
         status["components"]["gemini"] = "not initialized"
         errors.append("Gemini model not initialized.")
+
+    # Check GROQ Client
+    if groq_client is not None:
+        try:
+            _ = groq_client.chat.completions.create(
+                messages=[{"role": "user", "content": "ping"}],
+                model=GROQ_MODEL_NAME, # Use the defined model name here
+                max_tokens=1
+            )
+            status["components"]["groq"] = "ok"
+        except Exception as e:
+            status["components"]["groq"] = "error"
+            errors.append(f"GROQ connectivity failed: {e}")
+            logger.error(f"Health check: GROQ connectivity error: {e}")
+    else:
+        status["components"]["groq"] = "not initialized"
+        errors.append("GROQ client not initialized.")
 
     # Check RAG System
     if rag is not None and rag.chunks is not None and len(rag.chunks) > 0 and rag.embeddings is not None:
@@ -237,7 +332,7 @@ def health_check():
         errors.append("RAG data (chunks/embeddings) not loaded or empty.")
 
     if errors:
-        status["status"] = "degraded" if len(errors) < 2 else "unhealthy" # More granular status
+        status["status"] = "degraded" if len(errors) < 2 else "unhealthy"
         status["message"] = "; ".join(errors)
 
     return status
@@ -245,103 +340,80 @@ def health_check():
 @app.post("/query")
 async def handle_query(req: Request):
     """
-    Handles incoming user queries, performs RAG, and returns a Gemini-generated response.
-    Includes robust error handling and a fallback message.
+    Handles incoming user queries, performs RAG, and returns a response from the faster LLM.
     """
     try:
-        # Check if core components are ready to serve queries
-        if rag is None or tokenizer_embedding_model_tuple is None or gemini_model is None:
-            logger.error("AI assistant not fully initialized. Cannot process query.")
-            raise HTTPException(status_code=503, detail="AI assistant is not ready. Please try again in a moment.")
-
         data = await req.json()
         user_input = data.get("input", "").strip()
+        is_first_query = data.get("is_first_query", False) # New parameter
 
         if not user_input:
             raise HTTPException(status_code=400, detail="Input query is required.")
         
-        logger.info(f"Received query: '{user_input}'")
+        logger.info(f"Received query: '{user_input}', Is First Query: {is_first_query}")
 
-        # Perform RAG search
-        # Using configured DEFAULT_TOP_K_CHUNKS and DEFAULT_SIMILARITY_THRESHOLD
-        retrieved_chunk = rag.query(user_input, tokenizer_embedding_model_tuple, 
-                                    top_k=DEFAULT_TOP_K_CHUNKS, 
-                                    similarity_threshold=DEFAULT_SIMILARITY_THRESHOLD)
+        retrieved_chunk = ""
+        if rag and tokenizer_embedding_model_tuple: # Ensure RAG is fully initialized
+            retrieved_chunk = rag.query(user_input, tokenizer_embedding_model_tuple, 
+                                        top_k=DEFAULT_TOP_K_CHUNKS, 
+                                        similarity_threshold=DEFAULT_SIMILARITY_THRESHOLD)
+        else:
+             logger.warning("RAG system not fully available. Querying LLMs without resume context.")
+
+        tasks = []
+        if gemini_model:
+            tasks.append(asyncio.create_task(generate_response_with_gemini(user_input, retrieved_chunk, is_first_query), name="gemini_task"))
+        if groq_client:
+            tasks.append(asyncio.create_task(generate_response_with_groq(user_input, retrieved_chunk, is_first_query), name="groq_task"))
+
+        if not tasks:
+            logger.error("Neither Gemini nor GROQ models are initialized. Cannot process query.")
+            raise HTTPException(status_code=503, detail="AI assistant is not ready. No LLM available.")
+
+        # Run all tasks concurrently and collect results and exceptions
+        responses = await asyncio.gather(*tasks, return_exceptions=True)
+
+        chosen_response = ""
+        api_source = "N/A"
+
+        # Check for the first valid response in the order of completion (or creation if both finish at same time)
+        for i, res in enumerate(responses):
+            if isinstance(res, Exception):
+                task_name = tasks[i].get_name() if hasattr(tasks[i], 'get_name') else "unknown_task"
+                logger.error(f"Task '{task_name}' raised an exception: {res}")
+                continue # Skip this response if it's an exception
+
+            # Check if response is valid and not a "blocked" message
+            if res and "i'm sorry, i cannot provide a response to that question." not in res.lower():
+                if tasks[i].get_name() == "gemini_task":
+                    api_source = "Gemini"
+                elif tasks[i].get_name() == "groq_task":
+                    api_source = "GROQ"
+                chosen_response = res
+                break # Found a valid response, stop searching
+
+        # If after checking all responses, nothing valid was found
+        if not chosen_response:
+            logger.warning(f"No valid response generated from any LLM for query: '{user_input}'")
+            return {
+                "response": (
+                    "I'm truly sorry, but I couldn't generate a helpful response for that right now. "
+                    "Perhaps try rephrasing your question or asking something else about Zohaib's resume. "
+                    "If you're a recruiter, I'd be happy to share Zohaib's contact details!"
+                )
+            }
         
-        # If no relevant chunk is found by RAG (due to similarity_threshold or no data)
-        if not retrieved_chunk:
-            logger.info(f"No relevant resume info found by RAG for query: '{user_input}' (threshold applied).")
-            return {
-                "response": (
-                    "I couldn’t find information directly related to that in Zohaib’s resume. "
-                    "Please try asking a different question or rephrasing your current one. "
-                    "Would you like me to pass your message along to him?"
-                )
-            }
-
-        logger.debug(f"Retrieved chunk for '{user_input[:50]}...': {retrieved_chunk}") # Use debug for large outputs
-
-        # Generate response using Gemini
-        response = generate_response_with_gemini(user_input, retrieved_chunk)
-
-        # Enhance the "no answer" detection from Gemini's response
-        no_answer_phrases = [
-            "i couldn't find", "doesn't mention", "not stated", 
-            "information is not available", "not present in the resume",
-            "i don't have information", "not provided in the resume"
-        ]
-        if not response or any(phrase in response.lower() for phrase in no_answer_phrases):
-            logger.info(f"Gemini indicated no relevant info (or blocked) for query: '{user_input}'")
-            return {
-                "response": (
-                    "I’m sorry, I couldn’t find a relevant answer in Zohaib’s resume based on the information I have. "
-                    "Would you like me to pass your message along to him?"
-                )
-            }
-
-        logger.info(f"Successfully generated response for query: '{user_input}'")
-        return {"response": response}
+        logger.info(f"Successfully generated response from {api_source} for query: '{user_input}'")
+        return {"response": chosen_response}
     
     except HTTPException as he:
         logger.warning(f"HTTP Exception caught: {he.detail}")
-        raise he # Re-raise HTTPExceptions
+        raise he
     except Exception as e:
-        # Catch any other unexpected errors and log them with traceback
         logger.exception(f"Internal Server Error during query handling for input '{user_input if 'user_input' in locals() else 'N/A'}'.")
         raise HTTPException(status_code=500, detail=f"Internal Server Error: Something went wrong while processing your request. Please try again.")
 
-@app.get("/models")
-def list_gemini_models():
-    """
-    Lists available Gemini models. Useful for debugging and understanding model capabilities.
-    """
-    if gemini_model is None:
-        logger.error("Attempted to list models before Gemini was initialized.")
-        raise HTTPException(status_code=503, detail="Gemini model not initialized.")
-    try:
-        models = genai.list_models()
-        model_list = []
-        for m in models:
-            # Filter for models that support text generation if you only care about that
-            if "generateContent" in getattr(m, "supported_generation_methods", []):
-                model_list.append({
-                    "name": m.name,
-                    "display_name": getattr(m, "display_name", "N/A"),
-                    "generation_methods": getattr(m, "supported_generation_methods", "N/A")
-                })
-        logger.info(f"Listed {len(model_list)} Gemini models.")
-        return {"models": model_list}
-    except Exception as e:
-        logger.exception("Error fetching Gemini models list.")
-        raise HTTPException(status_code=500, detail=f"Error fetching models: {str(e)}")
-
 # --- Run Application ---
 if __name__ == "__main__":
-    # Ensure the 'data' directory exists for local embeddings cache before uvicorn starts
-    # This also helps with the Hugging Face Space persistent storage for `data/embeddings.pkl`
     os.makedirs("data", exist_ok=True)
-    
-    # Use uvicorn.run for production-ready server
-    # host="0.0.0.0" makes it accessible from outside localhost
-    # port is taken from environment variable or defaults to 7860
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 7860)))
