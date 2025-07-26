@@ -32,17 +32,16 @@ class RAGSearch:
 
     def query(self, user_input: str, model_tuple: tuple, top_k: int = 5, similarity_threshold: float = 0.75) -> str:
         """
-        Performs a RAG query: embeds the user input, finds similar chunks,
-        and returns a concatenated string of the most relevant chunks.
+        Performs an enhanced RAG query with better context assembly for JARVIS-like responses.
+        Retrieves and contextualizes the most relevant chunks for natural conversation.
         
         Args:
             user_input (str): The user's query string.
             model_tuple (tuple): A tuple containing the tokenizer and embedding model.
             top_k (int): The number of top relevant chunks to retrieve *after* filtering by threshold.
             similarity_threshold (float): Minimum cosine similarity to consider a chunk relevant.
-                                          Chunks below this threshold will be excluded.
         Returns:
-            str: A concatenated string of relevant chunks, or an empty string if none are relevant.
+            str: A well-structured context string with relevant information and metadata.
         """
         tokenizer, model = model_tuple
         
@@ -90,5 +89,21 @@ class RAGSearch:
         
         logger.info(f"Retrieved {len(final_relevant_chunks)} relevant chunks (top {top_k} from threshold-filtered results).")
         
-        # Join chunks with a clear separator for the LLM
-        return "\n---\n".join(final_relevant_chunks)
+        # Enhanced but focused context assembly
+        context_sections = []
+        
+        # Add a concise context header
+        context_header = f"=== RELEVANT CONTEXT FOR: '{user_input}' ==="
+        context_sections.append(context_header)
+        
+        # Add only the most relevant chunks without verbose metadata
+        for i, chunk in enumerate(final_relevant_chunks):
+            section_header = f"\n--- Section {i+1} ---"
+            context_sections.append(section_header)
+            context_sections.append(chunk)
+        
+        # Add a simple footer
+        context_footer = f"\n=== END CONTEXT === \nUse this focused information to provide a direct, helpful answer."
+        context_sections.append(context_footer)
+        
+        return "\n".join(context_sections)
