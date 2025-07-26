@@ -33,7 +33,7 @@ origins = [
     "http://127.0.0.1:3000",
     "http://localhost:8000",
     "http://127.0.0.1:8000",
-    "https://20481A5450.github.io/Zo",
+    "https://20481A5450.github.io",
     "*"
 ]
 
@@ -211,6 +211,7 @@ def create_resume_prompt(user_input: str, context_chunk: str, assistant_name: st
 async def generate_response_with_gemini(user_input: str, context_chunk: str, is_first_query: bool) -> str:
     """
     Generates a response using the Gemini model based on user input and retrieved context.
+    Returns a special sentinel string if quota is exceeded.
     """
     global gemini_model
     if gemini_model is None:
@@ -243,8 +244,12 @@ async def generate_response_with_gemini(user_input: str, context_chunk: str, is_
             return ""
 
     except Exception as e:
+        error_message = str(e)
+        if "429 You exceeded your current quota" in error_message or "Quota exceeded" in error_message:
+            logger.error(f"Gemini quota exceeded for input '{user_input[:50]}...'.")
+            return "GEMINI_QUOTA_EXCEEDED" # Special sentinel value
         logger.error(f"Error generating Gemini response for input '{user_input[:50]}...': {e}")
-        return ""
+        return "" # Default empty string for other errors
 
 # --- GROQ Response Generation Function ---
 
@@ -345,7 +350,7 @@ async def handle_query(req: Request):
     try:
         data = await req.json()
         user_input = data.get("input", "").strip()
-        is_first_query = data.get("is_first_query", False) # New parameter
+        is_first_query = data.get("is_first_query", False)
 
         if not user_input:
             raise HTTPException(status_code=400, detail="Input query is required.")
@@ -375,13 +380,18 @@ async def handle_query(req: Request):
 
         chosen_response = ""
         api_source = "N/A"
+        gemini_quota_hit = False
 
-        # Check for the first valid response in the order of completion (or creation if both finish at same time)
+        # Check for the first valid response in the order of task creation (or completion)
         for i, res in enumerate(responses):
             if isinstance(res, Exception):
                 task_name = tasks[i].get_name() if hasattr(tasks[i], 'get_name') else "unknown_task"
                 logger.error(f"Task '{task_name}' raised an exception: {res}")
                 continue # Skip this response if it's an exception
+
+            if res == "GEMINI_QUOTA_EXCEEDED":
+                gemini_quota_hit = True
+                continue # Don't consider this a valid response, but note the quota issue
 
             # Check if response is valid and not a "blocked" message
             if res and "i'm sorry, i cannot provide a response to that question." not in res.lower():
@@ -394,14 +404,23 @@ async def handle_query(req: Request):
 
         # If after checking all responses, nothing valid was found
         if not chosen_response:
-            logger.warning(f"No valid response generated from any LLM for query: '{user_input}'")
-            return {
-                "response": (
-                    "I'm truly sorry, but I couldn't generate a helpful response for that right now. "
-                    "Perhaps try rephrasing your question or asking something else about Zohaib's resume. "
-                    "If you're a recruiter, I'd be happy to share Zohaib's contact details!"
-                )
-            }
+            if gemini_quota_hit:
+                logger.warning(f"Gemini quota hit and no other LLM provided a valid response for query: '{user_input}'")
+                return {
+                    "response": (
+                        "I'm sorry, Zohaib's AI assistant is currently experiencing high demand. "
+                        "The Gemini API quota has been reached. Please try again later, or contact Zohaib directly via his email at shaikzohaibgec@gmail.com."
+                    )
+                }
+            else:
+                logger.warning(f"No valid response generated from any LLM for query: '{user_input}'")
+                return {
+                    "response": (
+                        "I'm truly sorry, but I couldn't generate a helpful response for that right now. "
+                        "Perhaps try rephrasing your question or asking something else about Zohaib's resume. "
+                        "If you're a recruiter, I'd be happy to share Zohaib's contact details!"
+                    )
+                }
         
         logger.info(f"Successfully generated response from {api_source} for query: '{user_input}'")
         return {"response": chosen_response}
